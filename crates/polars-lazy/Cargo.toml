@@ -26,8 +26,8 @@ glob = { version = "0.3" }
 once_cell = { workspace = true }
 pyo3 = { workspace = true, optional = true }
 rayon = { workspace = true }
-smartstring = { workspace = true }
 serde = { wokspace = true, features = ["derive"] }
+smartstring = { workspace = true }
 tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
