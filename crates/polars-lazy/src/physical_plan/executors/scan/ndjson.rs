@@ -1,4 +1,3 @@
-use bitflags::__private::serde;
 use super::*;
 use crate::prelude::{AnonymousScan, LazyJsonLineReader};
 
