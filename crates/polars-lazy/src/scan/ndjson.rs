@@ -4,12 +4,14 @@ use std::sync::RwLock;
 
 use polars_core::prelude::*;
 use polars_io::RowIndex;
+#[cfg(feature = "serde")]
 use serde::{Serialize, Deserialize};
 
 use super::*;
 use crate::prelude::{LazyFrame, ScanArgsAnonymous};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct LazyJsonLineReader {
     pub(crate) path: PathBuf,
     paths: Arc<[PathBuf]>,
