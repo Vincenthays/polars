@@ -27,14 +27,11 @@ from polars.testing.parametric import columns
 from polars.utils._construction import iterable_to_pydf
 
 if TYPE_CHECKING:
-    from polars.type_aliases import JoinStrategy, UniqueKeepStrategy
-
-if sys.version_info >= (3, 9):
     from zoneinfo import ZoneInfo
+
+    from polars.type_aliases import JoinStrategy, UniqueKeepStrategy
 else:
-    # Import from submodule due to typing issue with backports.zoneinfo package:
-    # https://github.com/pganssle/zoneinfo/issues/125
-    from backports.zoneinfo._zoneinfo import ZoneInfo
+    from polars.utils.convert import string_to_zoneinfo as ZoneInfo
 
 
 def test_version() -> None:
@@ -257,6 +254,15 @@ def test_from_arrow(monkeypatch: Any) -> None:
         df = cast(pl.DataFrame, pl.from_arrow(arrow_data))
         assert df.schema == expected_schema
         assert df.rows() == expected_data
+
+    # record batches (inc. empty)
+    for b, n_expected in (
+        (record_batches[0], 1),
+        (record_batches[0][:0], 0),
+    ):
+        df = cast(pl.DataFrame, pl.from_arrow(b))
+        assert df.schema == expected_schema
+        assert df.rows() == expected_data[:n_expected]
 
     empty_tbl = tbl[:0]  # no rows
     df = cast(pl.DataFrame, pl.from_arrow(empty_tbl))
@@ -1047,32 +1053,6 @@ def test_literal_series() -> None:
         out,
         atol=0.00001,
     )
-
-
-def test_to_html() -> None:
-    # check it does not panic/error, and appears to contain
-    # a reasonable table with suitably escaped html entities.
-    df = pl.DataFrame(
-        {
-            "foo": [1, 2, 3],
-            "<bar>": ["a", "b", "c"],
-            "<baz": ["a", "b", "c"],
-            "spam>": ["a", "b", "c"],
-        }
-    )
-    html = df._repr_html_()
-    for match in (
-        "<table",
-        'class="dataframe"',
-        "<th>foo</th>",
-        "<th>&lt;bar&gt;</th>",
-        "<th>&lt;baz</th>",
-        "<th>spam&gt;</th>",
-        "<td>1</td>",
-        "<td>2</td>",
-        "<td>3</td>",
-    ):
-        assert match in html, f"Expected to find {match!r} in html repr"
 
 
 def test_rename(df: pl.DataFrame) -> None:
@@ -2810,7 +2790,7 @@ def test_init_datetimes_with_timezone() -> None:
     tz_europe = "Europe/Amsterdam"
 
     dtm = datetime(2022, 10, 12, 12, 30)
-    for time_unit in DTYPE_TEMPORAL_UNITS | frozenset([None]):
+    for time_unit in DTYPE_TEMPORAL_UNITS:
         for type_overrides in (
             {
                 "schema": [
@@ -2912,7 +2892,7 @@ def test_init_physical_with_timezone() -> None:
     tz_asia = "Asia/Tokyo"
 
     dtm_us = 1665577800000000
-    for time_unit in DTYPE_TEMPORAL_UNITS | frozenset([None]):
+    for time_unit in DTYPE_TEMPORAL_UNITS:
         dtm = {"ms": dtm_us // 1_000, "ns": dtm_us * 1_000}.get(str(time_unit), dtm_us)
         df = pl.DataFrame(
             data={"d1": [dtm], "d2": [dtm]},

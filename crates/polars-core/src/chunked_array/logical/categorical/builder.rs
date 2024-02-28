@@ -3,7 +3,6 @@ use arrow::legacy::trusted_len::TrustedLenPush;
 use hashbrown::hash_map::Entry;
 use polars_utils::iter::EnumerateIdxTrait;
 
-use crate::datatypes::PlHashMap;
 use crate::hashing::_HASHMAP_INIT_SIZE;
 use crate::prelude::*;
 use crate::{using_string_cache, StringCache, POOL};
@@ -386,7 +385,6 @@ impl CategoricalChunked {
 
 #[cfg(test)]
 mod test {
-    use crate::chunked_array::categorical::CategoricalChunkedBuilder;
     use crate::prelude::*;
     use crate::{disable_string_cache, enable_string_cache, SINGLE_LOCK};
 

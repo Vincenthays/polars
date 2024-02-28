@@ -531,15 +531,21 @@ def sequence_to_pyseries(
             # We use the AnyValue builder to create the datetime array
             # We store the values internally as UTC and set the timezone
             py_series = PySeries.new_from_any_values(name, values, strict)
+
             time_unit = getattr(dtype, "time_unit", None)
+            time_zone = getattr(dtype, "time_zone", None)
+
             if time_unit is None or values_dtype == Date:
                 s = wrap_s(py_series)
             else:
                 s = wrap_s(py_series).dt.cast_time_unit(time_unit)
-            time_zone = getattr(dtype, "time_zone", None)
 
             if (values_dtype == Date) & (dtype == Datetime):
-                return s.cast(Datetime(time_unit)).dt.replace_time_zone(time_zone)._s
+                return (
+                    s.cast(Datetime(time_unit or "us"))
+                    .dt.replace_time_zone(time_zone)
+                    ._s
+                )
 
             if (dtype == Datetime) and (
                 value.tzinfo is not None or time_zone is not None
@@ -597,7 +603,7 @@ def sequence_to_pyseries(
                 return PySeries.new_object(name, values, strict)
             if dtype:
                 srs = sequence_from_any_value_and_dtype_or_object(name, values, dtype)
-                if not dtype.is_(srs.dtype()):
+                if dtype != srs.dtype():
                     srs = srs.cast(dtype, strict=False)
                 return srs
             return sequence_from_any_value_or_object(name, values)
@@ -1568,19 +1574,21 @@ def numpy_to_pydf(
 
 
 def arrow_to_pydf(
-    data: pa.Table,
+    data: pa.Table | pa.RecordBatch,
     schema: SchemaDefinition | None = None,
     *,
     schema_overrides: SchemaDict | None = None,
     rechunk: bool = True,
 ) -> PyDataFrame:
-    """Construct a PyDataFrame from an Arrow Table."""
+    """Construct a PyDataFrame from an Arrow Table or RecordBatch."""
     original_schema = schema
     column_names, schema_overrides = _unpack_schema(
         (schema or data.column_names), schema_overrides=schema_overrides
     )
     try:
         if column_names != data.column_names:
+            if isinstance(data, pa.RecordBatch):
+                data = pa.Table.from_batches([data])
             data = data.rename_columns(column_names)
     except pa.lib.ArrowInvalid as e:
         msg = "dimensions of columns arg must match data dimensions"

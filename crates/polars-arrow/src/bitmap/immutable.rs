@@ -1,4 +1,3 @@
-use std::iter::FromIterator;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -190,6 +189,7 @@ impl Bitmap {
     }
 
     /// Slices `self`, offsetting by `offset` and truncating up to `length` bits.
+    ///
     /// # Safety
     /// The caller must ensure that `self.offset + offset + length <= self.len()`
     #[inline]
@@ -246,6 +246,7 @@ impl Bitmap {
     }
 
     /// Slices `self`, offsetting by `offset` and truncating up to `length` bits.
+    ///
     /// # Safety
     /// The caller must ensure that `self.offset + offset + length <= self.len()`
     #[inline]
@@ -264,6 +265,7 @@ impl Bitmap {
     }
 
     /// Unsafely returns whether the bit at position `i` is set.
+    ///
     /// # Safety
     /// Unsound iff `i >= self.len()`.
     #[inline]
@@ -418,6 +420,7 @@ impl FromIterator<bool> for Bitmap {
 
 impl Bitmap {
     /// Creates a new [`Bitmap`] from an iterator of booleans.
+    ///
     /// # Safety
     /// The iterator must report an accurate length.
     #[inline]
@@ -440,6 +443,7 @@ impl Bitmap {
     }
 
     /// Creates a new [`Bitmap`] from a fallible iterator of booleans.
+    ///
     /// # Safety
     /// The iterator must report an accurate length.
     #[inline]

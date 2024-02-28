@@ -10,23 +10,18 @@ use polars::frame::row::Row;
 use polars::frame::NullStrategy;
 #[cfg(feature = "avro")]
 use polars::io::avro::AvroCompression;
-#[cfg(feature = "ipc")]
-use polars::io::ipc::IpcCompression;
-use polars::prelude::AnyValue;
 use polars::series::ops::NullBehavior;
-use polars_core::prelude::{IndexOrder, QuantileInterpolOptions};
 use polars_core::utils::arrow::array::Array;
 use polars_core::utils::arrow::types::NativeType;
 use polars_lazy::prelude::*;
 #[cfg(feature = "cloud")]
 use polars_rs::io::cloud::CloudOptions;
-use polars_utils::total_ord::TotalEq;
+use polars_utils::total_ord::{TotalEq, TotalHash};
 use pyo3::basic::CompareOp;
-use pyo3::conversion::{FromPyObject, IntoPy};
 use pyo3::exceptions::{PyTypeError, PyValueError};
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySequence};
-use pyo3::{intern, PyAny, PyResult};
 use smartstring::alias::String as SmartString;
 
 use crate::error::PyPolarsErr;
@@ -495,6 +490,15 @@ impl PartialEq for ObjectValue {
 impl TotalEq for ObjectValue {
     fn tot_eq(&self, other: &Self) -> bool {
         self == other
+    }
+}
+
+impl TotalHash for ObjectValue {
+    fn tot_hash<H>(&self, state: &mut H)
+    where
+        H: Hasher,
+    {
+        self.hash(state);
     }
 }
 

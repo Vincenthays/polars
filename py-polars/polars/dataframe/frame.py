@@ -13,7 +13,6 @@ from typing import (
     IO,
     TYPE_CHECKING,
     Any,
-    BinaryIO,
     Callable,
     ClassVar,
     Collection,
@@ -90,7 +89,7 @@ from polars.utils._construction import (
 )
 from polars.utils._parse_expr_input import parse_as_expression
 from polars.utils._wrap import wrap_expr, wrap_ldf, wrap_s
-from polars.utils.convert import _timedelta_to_pl_duration
+from polars.utils.convert import parse_as_duration_string
 from polars.utils.deprecation import (
     deprecate_function,
     deprecate_nonkeyword_arguments,
@@ -348,6 +347,8 @@ class DataFrame:
     False
     """
 
+    __slots__ = ("_df",)
+    _df: PyDataFrame
     _accessors: ClassVar[set[str]] = {"plot"}
 
     def __init__(
@@ -537,7 +538,7 @@ class DataFrame:
     @classmethod
     def _from_arrow(
         cls,
-        data: pa.Table,
+        data: pa.Table | pa.RecordBatch,
         schema: SchemaDefinition | None = None,
         *,
         schema_overrides: SchemaDict | None = None,
@@ -551,8 +552,8 @@ class DataFrame:
 
         Parameters
         ----------
-        data : arrow table, array, or sequence of sequences
-            Data representing an Arrow Table or Array.
+        data : arrow Table, RecordBatch, or sequence of sequences
+            Data representing an Arrow Table or RecordBatch.
         schema : Sequence of str, (str,DataType) pairs, or a {str:DataType,} dict
             The DataFrame schema may be declared in several ways:
 
@@ -848,7 +849,7 @@ class DataFrame:
     @classmethod
     def _read_avro(
         cls,
-        source: str | Path | BinaryIO | bytes,
+        source: str | Path | IO[bytes] | bytes,
         *,
         columns: Sequence[int] | Sequence[str] | None = None,
         n_rows: int | None = None,
@@ -1807,7 +1808,7 @@ class DataFrame:
     def _ipython_key_completions_(self) -> list[str]:
         return self.columns
 
-    def _repr_html_(self, **kwargs: Any) -> str:
+    def _repr_html_(self, *, _from_series: bool = False) -> str:
         """
         Format output data in HTML for display in Jupyter Notebooks.
 
@@ -1819,18 +1820,18 @@ class DataFrame:
         """
         max_cols = int(os.environ.get("POLARS_FMT_MAX_COLS", default=75))
         if max_cols < 0:
-            max_cols = self.shape[1]
-        max_rows = int(os.environ.get("POLARS_FMT_MAX_ROWS", default=25))
-        if max_rows < 0:
-            max_rows = self.shape[0]
+            max_cols = self.width
 
-        from_series = kwargs.get("from_series", False)
+        max_rows = int(os.environ.get("POLARS_FMT_MAX_ROWS", default=10))
+        if max_rows < 0:
+            max_rows = self.height
+
         return "".join(
             NotebookFormatter(
                 self,
                 max_cols=max_cols,
                 max_rows=max_rows,
-                from_series=from_series,
+                from_series=_from_series,
             ).render()
         )
 
@@ -2048,8 +2049,9 @@ class DataFrame:
         structured: bool = False,  # noqa: FBT001
         *,
         order: IndexOrder = "fortran",
-        use_pyarrow: bool = True,
+        allow_copy: bool = True,
         writable: bool = False,
+        use_pyarrow: bool = True,
     ) -> np.ndarray[Any, Any]:
         """
         Convert this DataFrame to a NumPy ndarray.
@@ -2070,20 +2072,18 @@ class DataFrame:
             one-dimensional array. Note that this option only takes effect if
             `structured` is set to `False` and the DataFrame dtypes allow for a
             global dtype for all columns.
+        allow_copy
+            Allow memory to be copied to perform the conversion. If set to `False`,
+            causes conversions that are not zero-copy to fail.
+        writable
+            Ensure the resulting array is writable. This will force a copy of the data
+            if the array was created without copy, as the underlying Arrow data is
+            immutable.
         use_pyarrow
             Use `pyarrow.Array.to_numpy
             <https://arrow.apache.org/docs/python/generated/pyarrow.Array.html#pyarrow.Array.to_numpy>`_
 
             function for the conversion to numpy if necessary.
-        writable
-            Ensure the resulting array is writable. This will force a copy of the data
-            if the array was created without copy, as the underlying Arrow data is
-            immutable.
-
-        Notes
-        -----
-        If you're attempting to convert String or Decimal to an array, you'll need to
-        install `pyarrow`.
 
         Examples
         --------
@@ -2117,7 +2117,15 @@ class DataFrame:
         rec.array([(1, 6.5, 'a'), (2, 7. , 'b'), (3, 8.5, 'c')],
                   dtype=[('foo', 'u1'), ('bar', '<f4'), ('ham', '<U1')])
         """
+
+        def raise_on_copy(msg: str) -> None:
+            if not allow_copy and not self.is_empty():
+                msg = f"copy not allowed: {msg}"
+                raise RuntimeError(msg)
+
         if structured:
+            raise_on_copy("cannot create structured array without copying data")
+
             arrays = []
             struct_dtype = []
             for s in self.iter_columns():
@@ -2136,8 +2144,13 @@ class DataFrame:
             array = self._df.to_numpy_view()
             if array is not None:
                 if writable and not array.flags.writeable:
+                    raise_on_copy("cannot create writable array without copying data")
                     array = array.copy()
                 return array
+
+        raise_on_copy(
+            "only numeric data without nulls in Fortran-like order can be converted without copy"
+        )
 
         out = self._df.to_numpy(order)
         if out is None:
@@ -2438,7 +2451,7 @@ class DataFrame:
         Parameters
         ----------
         file
-            File path or writeable file-like object to which the result will be written.
+            File path or writable file-like object to which the result will be written.
             If set to `None` (default), the output is returned as a string instead.
         pretty
             Pretty serialize json.
@@ -2494,7 +2507,7 @@ class DataFrame:
         Parameters
         ----------
         file
-            File path or writeable file-like object to which the result will be written.
+            File path or writable file-like object to which the result will be written.
             If set to `None` (default), the output is returned as a string instead.
 
         Examples
@@ -2548,7 +2561,7 @@ class DataFrame:
     @overload
     def write_csv(
         self,
-        file: BytesIO | TextIOWrapper | str | Path,
+        file: str | Path | IO[str] | IO[bytes],
         *,
         include_bom: bool = ...,
         include_header: bool = ...,
@@ -2569,7 +2582,7 @@ class DataFrame:
     @deprecate_renamed_parameter("has_header", "include_header", version="0.19.13")
     def write_csv(
         self,
-        file: BytesIO | TextIOWrapper | str | Path | None = None,
+        file: str | Path | IO[str] | IO[bytes] | None = None,
         *,
         include_bom: bool = False,
         include_header: bool = True,
@@ -2590,7 +2603,7 @@ class DataFrame:
         Parameters
         ----------
         file
-            File path or writeable file-like object to which the result will be written.
+            File path or writable file-like object to which the result will be written.
             If set to `None` (default), the output is returned as a string instead.
         include_bom
             Whether to include UTF-8 BOM in the CSV output.
@@ -2691,7 +2704,7 @@ class DataFrame:
 
     def write_avro(
         self,
-        file: BinaryIO | BytesIO | str | Path,
+        file: str | Path | IO[bytes],
         compression: AvroCompression = "uncompressed",
         name: str = "",
     ) -> None:
@@ -2701,7 +2714,7 @@ class DataFrame:
         Parameters
         ----------
         file
-            File path or writeable file-like object to which the data will be written.
+            File path or writable file-like object to which the data will be written.
         compression : {'uncompressed', 'snappy', 'deflate'}
             Compression method. Defaults to "uncompressed".
         name
@@ -2733,7 +2746,7 @@ class DataFrame:
     @deprecate_renamed_parameter("has_header", "include_header", version="0.19.13")
     def write_excel(
         self,
-        workbook: Workbook | BytesIO | Path | str | None = None,
+        workbook: Workbook | IO[bytes] | Path | str | None = None,
         worksheet: str | None = None,
         *,
         position: tuple[int, int] | str = "A1",
@@ -3247,7 +3260,7 @@ class DataFrame:
     @overload
     def write_ipc(
         self,
-        file: BinaryIO | BytesIO | str | Path,
+        file: str | Path | IO[bytes],
         compression: IpcCompression = "uncompressed",
         *,
         future: bool = False,
@@ -3256,7 +3269,7 @@ class DataFrame:
 
     def write_ipc(
         self,
-        file: BinaryIO | BytesIO | str | Path | None,
+        file: str | Path | IO[bytes] | None,
         compression: IpcCompression = "uncompressed",
         *,
         future: bool = False,
@@ -3269,7 +3282,7 @@ class DataFrame:
         Parameters
         ----------
         file
-            Path or writeable file-like object to which the IPC data will be
+            Path or writable file-like object to which the IPC data will be
             written. If set to `None`, the output is returned as a BytesIO object.
         compression : {'uncompressed', 'lz4', 'zstd'}
             Compression method. Defaults to "uncompressed".
@@ -3323,14 +3336,14 @@ class DataFrame:
     @overload
     def write_ipc_stream(
         self,
-        file: BinaryIO | BytesIO | str | Path,
+        file: str | Path | IO[bytes],
         compression: IpcCompression = "uncompressed",
     ) -> None:
         ...
 
     def write_ipc_stream(
         self,
-        file: BinaryIO | BytesIO | str | Path | None,
+        file: str | Path | IO[bytes] | None,
         compression: IpcCompression = "uncompressed",
     ) -> BytesIO | None:
         """
@@ -3341,7 +3354,7 @@ class DataFrame:
         Parameters
         ----------
         file
-            Path or writeable file-like object to which the IPC record batch data will
+            Path or writable file-like object to which the IPC record batch data will
             be written. If set to `None`, the output is returned as a BytesIO object.
         compression : {'uncompressed', 'lz4', 'zstd'}
             Compression method. Defaults to "uncompressed".
@@ -3390,7 +3403,7 @@ class DataFrame:
         Parameters
         ----------
         file
-            File path or writeable file-like object to which the result will be written.
+            File path or writable file-like object to which the result will be written.
         compression : {'lz4', 'uncompressed', 'snappy', 'gzip', 'lzo', 'brotli', 'zstd'}
             Choose "zstd" for good compression performance.
             Choose "lz4" for fast compression/decompression.
@@ -4444,10 +4457,11 @@ class DataFrame:
 
         Customize which percentiles are displayed, applying linear interpolation:
 
-        >>> df.describe(
-        ...     percentiles=[0.1, 0.3, 0.5, 0.7, 0.9],
-        ...     interpolation="linear",
-        ... )
+        >>> with pl.Config(tbl_rows=12):
+        ...     df.describe(
+        ...         percentiles=[0.1, 0.3, 0.5, 0.7, 0.9],
+        ...         interpolation="linear",
+        ...     )
         shape: (11, 7)
         ┌────────────┬──────────┬──────────┬──────────┬──────┬────────────┬──────────┐
         │ statistic  ┆ float    ┆ int      ┆ bool     ┆ str  ┆ date       ┆ time     │
@@ -5482,7 +5496,7 @@ class DataFrame:
         check_sorted: bool = True,
     ) -> RollingGroupBy:
         """
-        Create rolling groups based on a time, Int32, or Int64 column.
+        Create rolling groups based on a temporal or integer column.
 
         Different from a `group_by_dynamic` the windows are now determined by the
         individual values and are not of constant intervals. For constant intervals use
@@ -5526,11 +5540,6 @@ class DataFrame:
         not be 24 hours, due to daylight savings). Similarly for "calendar week",
         "calendar month", "calendar quarter", and "calendar year".
 
-        In case of a rolling operation on an integer column, the windows are defined by:
-
-        - **"1i"      # length 1**
-        - **"10i"     # length 10**
-
         Parameters
         ----------
         index_column
@@ -5540,8 +5549,8 @@ class DataFrame:
             then it must be sorted in ascending order within each group).
 
             In case of a rolling operation on indices, dtype needs to be one of
-            {Int32, Int64}. Note that Int32 gets temporarily cast to Int64, so if
-            performance matters use an Int64 column.
+            {UInt32, UInt64, Int32, Int64}. Note that the first three get temporarily
+            cast to Int64, so if performance matters use an Int64 column.
         period
             length of the window - must be non-negative
         offset
@@ -6052,8 +6061,8 @@ class DataFrame:
         if offset is None:
             offset = "0ns"
 
-        every = _timedelta_to_pl_duration(every)
-        offset = _timedelta_to_pl_duration(offset)
+        every = parse_as_duration_string(every)
+        offset = parse_as_duration_string(offset)
 
         return self._from_pydf(
             self._df.upsample(by, time_column, every, offset, maintain_order)
@@ -6260,7 +6269,7 @@ class DataFrame:
             * *outer_coalesce*
                  Same as 'outer', but coalesces the key columns
             * *cross*
-                 Returns the cartisian product of rows from both tables
+                 Returns the Cartesian product of rows from both tables
             * *semi*
                  Filter rows that have a match in the right table.
             * *anti*
@@ -7270,7 +7279,8 @@ class DataFrame:
         ----------
         values
             Column values to aggregate. Can be multiple columns if the *columns*
-            arguments contains multiple columns as well.
+            arguments contains multiple columns as well. If None, all remaining columns
+            will be used.
         index
             One or multiple keys to group by.
         columns
@@ -7386,9 +7396,10 @@ class DataFrame:
         │ b    ┆ 0.964028 ┆ 0.999954 │
         └──────┴──────────┴──────────┘
         """  # noqa: W505
-        values = _expand_selectors(self, values)
         index = _expand_selectors(self, index)
         columns = _expand_selectors(self, columns)
+        if values is not None:
+            values = _expand_selectors(self, values)
 
         if isinstance(aggregate_function, str):
             if aggregate_function == "first":
@@ -7424,9 +7435,9 @@ class DataFrame:
 
         return self._from_pydf(
             self._df.pivot_expr(
-                values,
                 index,
                 columns,
+                values,
                 maintain_order,
                 sort_columns,
                 aggregate_expr,
@@ -9206,9 +9217,15 @@ class DataFrame:
         df = self.lazy().select(expr.n_unique()).collect(_eager=True)
         return 0 if df.is_empty() else df.row(0)[0]
 
+    @deprecate_function(
+        "Use `select(pl.all().approx_n_unique())` instead.", version="0.20.11"
+    )
     def approx_n_unique(self) -> DataFrame:
         """
         Approximate count of unique values.
+
+        .. deprecated:: 0.20.11
+            Use `select(pl.all().approx_n_unique())` instead.
 
         This is done using the HyperLogLog++ algorithm for cardinality estimation.
 
@@ -9220,7 +9237,7 @@ class DataFrame:
         ...         "b": [1, 2, 1, 1],
         ...     }
         ... )
-        >>> df.approx_n_unique()
+        >>> df.approx_n_unique()  # doctest: +SKIP
         shape: (1, 2)
         ┌─────┬─────┐
         │ a   ┆ b   │

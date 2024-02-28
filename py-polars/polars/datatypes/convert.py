@@ -66,7 +66,7 @@ else:
 if TYPE_CHECKING:
     from typing import Literal
 
-    from polars.type_aliases import PolarsDataType, PythonDataType, SchemaDict
+    from polars.type_aliases import PolarsDataType, PythonDataType, SchemaDict, TimeUnit
 
 
 PY_STR_TO_DTYPE: SchemaDict = {
@@ -246,12 +246,12 @@ class _DataTypeMappings:
             Int8: ctypes.c_int8,
             Int16: ctypes.c_int16,
             Int32: ctypes.c_int32,
-            Date: ctypes.c_int32,
             Int64: ctypes.c_int64,
             Float32: ctypes.c_float,
             Float64: ctypes.c_double,
             Datetime: ctypes.c_int64,
             Duration: ctypes.c_int64,
+            Date: ctypes.c_int32,
             Time: ctypes.c_int64,
         }
 
@@ -298,6 +298,8 @@ class _DataTypeMappings:
             ("u", 8): UInt64,
             ("f", 4): Float32,
             ("f", 8): Float64,
+            ("m", 8): Duration,
+            ("M", 8): Datetime,
         }
 
     @property
@@ -469,6 +471,8 @@ def numpy_char_code_to_dtype(dtype_char: str) -> PolarsDataType:
     dtype = np.dtype(dtype_char)
     if dtype.kind == "U":
         return String
+    elif dtype.kind == "S":
+        return Binary
     try:
         return DataTypeMappings.NUMPY_KIND_AND_ITEMSIZE_TO_DTYPE[
             (dtype.kind, dtype.itemsize)
@@ -482,16 +486,17 @@ def maybe_cast(el: Any, dtype: PolarsDataType) -> Any:
     """Try casting a value to a value that is valid for the given Polars dtype."""
     # cast el if it doesn't match
     from polars.utils.convert import (
-        _datetime_to_pl_timestamp,
-        _timedelta_to_pl_timedelta,
+        datetime_to_int,
+        timedelta_to_int,
     )
 
+    time_unit: TimeUnit
     if isinstance(el, datetime):
-        time_unit = getattr(dtype, "time_unit", None)
-        return _datetime_to_pl_timestamp(el, time_unit)
+        time_unit = getattr(dtype, "time_unit", "us")
+        return datetime_to_int(el, time_unit)
     elif isinstance(el, timedelta):
-        time_unit = getattr(dtype, "time_unit", None)
-        return _timedelta_to_pl_timedelta(el, time_unit)
+        time_unit = getattr(dtype, "time_unit", "us")
+        return timedelta_to_int(el, time_unit)
 
     py_type = dtype_to_py_type(dtype)
     if not isinstance(el, py_type):

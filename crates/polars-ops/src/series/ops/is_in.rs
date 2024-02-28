@@ -1,3 +1,5 @@
+use std::hash::Hash;
+
 #[cfg(feature = "dtype-categorical")]
 use polars_core::apply_amortized_generic_list_or_array;
 use polars_core::prelude::*;
@@ -5,7 +7,7 @@ use polars_core::utils::{try_get_supertype, CustomIterTools};
 use polars_core::with_match_physical_numeric_polars_type;
 #[cfg(feature = "dtype-categorical")]
 use polars_utils::iter::EnumerateIdxTrait;
-use polars_utils::total_ord::{TotalEq, TotalHash, TotalOrdWrap};
+use polars_utils::total_ord::{ToTotalOrd, TotalEq, TotalHash};
 
 fn is_in_helper_ca<'a, T>(
     ca: &'a ChunkedArray<T>,
@@ -13,25 +15,27 @@ fn is_in_helper_ca<'a, T>(
 ) -> PolarsResult<BooleanChunked>
 where
     T: PolarsDataType,
-    T::Physical<'a>: TotalHash + TotalEq + Copy,
+    T::Physical<'a>: TotalHash + TotalEq + ToTotalOrd + Copy,
+    <T::Physical<'a> as ToTotalOrd>::TotalOrdItem: Hash + Eq + Copy,
 {
     let mut set = PlHashSet::with_capacity(other.len());
     other.downcast_iter().for_each(|iter| {
         iter.iter().for_each(|opt_val| {
             if let Some(v) = opt_val {
-                set.insert(TotalOrdWrap(v));
+                set.insert(v.to_total_ord());
             }
         })
     });
     Ok(ca
-        .apply_values_generic(|val| set.contains(&TotalOrdWrap(val)))
+        .apply_values_generic(|val| set.contains(&val.to_total_ord()))
         .with_name(ca.name()))
 }
 
 fn is_in_helper<'a, T>(ca: &'a ChunkedArray<T>, other: &Series) -> PolarsResult<BooleanChunked>
 where
     T: PolarsDataType,
-    T::Physical<'a>: TotalHash + TotalEq + Copy,
+    T::Physical<'a>: TotalHash + TotalEq + Copy + ToTotalOrd,
+    <T::Physical<'a> as ToTotalOrd>::TotalOrdItem: Hash + Eq + Copy,
 {
     let other = ca.unpack_series_matching_type(other)?;
     is_in_helper_ca(ca, other)
@@ -112,7 +116,8 @@ where
 fn is_in_numeric<T>(ca_in: &ChunkedArray<T>, other: &Series) -> PolarsResult<BooleanChunked>
 where
     T: PolarsNumericType,
-    T::Native: TotalHash + TotalEq,
+    T::Native: TotalHash + TotalEq + ToTotalOrd,
+    <T::Native as ToTotalOrd>::TotalOrdItem: Hash + Eq + Copy,
 {
     // We check implicitly cast to supertype here
     match other.dtype() {
@@ -231,6 +236,10 @@ fn is_in_string(ca_in: &StringChunked, other: &Series) -> PolarsResult<BooleanCh
         ),
         DataType::String => {
             is_in_binary(&ca_in.as_binary(), &other.cast(&DataType::Binary).unwrap())
+        },
+        #[cfg(feature = "dtype-categorical")]
+        DataType::Enum(_, _) | DataType::Categorical(_, _) => {
+            is_in_string_categorical(ca_in, other.categorical().unwrap())
         },
         _ => polars_bail!(opq = is_in, ca_in.dtype(), other.dtype()),
     }
@@ -557,6 +566,24 @@ fn is_in_struct(ca_in: &StructChunked, other: &Series) -> PolarsResult<BooleanCh
 }
 
 #[cfg(feature = "dtype-categorical")]
+fn is_in_string_categorical(
+    ca_in: &StringChunked,
+    other: &CategoricalChunked,
+) -> PolarsResult<BooleanChunked> {
+    // In case of fast unique, we can directly use the categories. Otherwise we need to
+    // first get the unique physicals
+    let categories = StringChunked::with_chunk("", other.get_rev_map().get_categories().clone());
+    let other = if other._can_fast_unique() {
+        categories
+    } else {
+        let s = other.physical().unique()?.cast(&IDX_DTYPE)?;
+        // SAFETY: Invariant of categorical means indices are in bound
+        unsafe { categories.take_unchecked(s.idx()?) }
+    };
+    is_in_helper_ca(&ca_in.as_binary(), &other.as_binary())
+}
+
+#[cfg(feature = "dtype-categorical")]
 fn is_in_cat(ca_in: &CategoricalChunked, other: &Series) -> PolarsResult<BooleanChunked> {
     match other.dtype() {
         DataType::Categorical(_, _) | DataType::Enum(_, _) => {
@@ -580,7 +607,7 @@ fn is_in_cat(ca_in: &CategoricalChunked, other: &Series) -> PolarsResult<Boolean
                             .contains(unsafe { categories.value_unchecked(*local_idx as usize) })
                         {
                             #[allow(clippy::unnecessary_cast)]
-                            set.insert(TotalOrdWrap(*global_idx as u32));
+                            set.insert((*global_idx as u32).to_total_ord());
                         }
                     }
                 },
@@ -591,7 +618,7 @@ fn is_in_cat(ca_in: &CategoricalChunked, other: &Series) -> PolarsResult<Boolean
                         .for_each(|(idx, v)| {
                             if others.contains(v) {
                                 #[allow(clippy::unnecessary_cast)]
-                                set.insert(TotalOrdWrap(idx as u32));
+                                set.insert((idx as u32).to_total_ord());
                             }
                         });
                 },
@@ -599,7 +626,7 @@ fn is_in_cat(ca_in: &CategoricalChunked, other: &Series) -> PolarsResult<Boolean
 
             Ok(ca_in
                 .physical()
-                .apply_values_generic(|val| set.contains(&TotalOrdWrap(val)))
+                .apply_values_generic(|val| set.contains(&val.to_total_ord()))
                 .with_name(ca_in.name()))
         },
 

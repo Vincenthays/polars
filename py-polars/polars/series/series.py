@@ -86,10 +86,10 @@ from polars.utils._construction import (
 )
 from polars.utils._wrap import wrap_df
 from polars.utils.convert import (
-    _date_to_pl_date,
-    _datetime_to_pl_timestamp,
-    _time_to_pl_time,
-    _timedelta_to_pl_timedelta,
+    date_to_int,
+    datetime_to_int,
+    time_to_int,
+    timedelta_to_int,
 )
 from polars.utils.deprecation import (
     deprecate_function,
@@ -237,7 +237,8 @@ class Series:
     ]
     """
 
-    _s: PySeries = None
+    __slots__ = ("_s",)
+    _s: PySeries
     _accessors: ClassVar[set[str]] = {
         "arr",
         "cat",
@@ -268,17 +269,18 @@ class Series:
                 version="0.20.6",
             )
 
-        # If 'Unknown' treat as None to attempt inference
+        # If 'Unknown' treat as None to trigger type inference
         if dtype == Unknown:
             dtype = None
-        # Raise early error on invalid dtype
-        elif (
-            dtype is not None
-            and not is_polars_dtype(dtype)
-            and py_type_to_dtype(dtype, raise_unmatched=False) is None
-        ):
-            msg = f"given dtype: {dtype!r} is not a valid Polars data type and cannot be converted into one"
-            raise ValueError(msg)
+        elif dtype is not None and not is_polars_dtype(dtype):
+            # Raise early error on invalid dtype
+            if not is_polars_dtype(
+                pl_dtype := py_type_to_dtype(dtype, raise_unmatched=False)
+            ):
+                msg = f"given dtype: {dtype!r} is not a valid Polars data type and cannot be converted into one"
+                raise ValueError(msg)
+            else:
+                dtype = pl_dtype
 
         # Handle case where values are passed as the first argument
         original_name: str | None = None
@@ -694,20 +696,20 @@ class Series:
             else:
                 msg = f"cannot compare datetime.datetime to Series of type {self.dtype}"
                 raise ValueError(msg)
-            ts = _datetime_to_pl_timestamp(other, time_unit)  # type: ignore[arg-type]
+            ts = datetime_to_int(other, time_unit)  # type: ignore[arg-type]
             f = get_ffi_func(op + "_<>", Int64, self._s)
             assert f is not None
             return self._from_pyseries(f(ts))
 
         elif isinstance(other, time) and self.dtype == Time:
-            d = _time_to_pl_time(other)
+            d = time_to_int(other)
             f = get_ffi_func(op + "_<>", Int64, self._s)
             assert f is not None
             return self._from_pyseries(f(d))
 
         elif isinstance(other, timedelta) and self.dtype == Duration:
             time_unit = self.dtype.time_unit  # type: ignore[attr-defined]
-            td = _timedelta_to_pl_timedelta(other, time_unit)  # type: ignore[arg-type]
+            td = timedelta_to_int(other, time_unit)  # type: ignore[arg-type]
             f = get_ffi_func(op + "_<>", Int64, self._s)
             assert f is not None
             return self._from_pyseries(f(td))
@@ -716,7 +718,7 @@ class Series:
             other = Series([other])
 
         elif isinstance(other, date) and self.dtype == Date:
-            d = _date_to_pl_date(other)
+            d = date_to_int(other)
             f = get_ffi_func(op + "_<>", Int32, self._s)
             assert f is not None
             return self._from_pyseries(f(d))
@@ -1430,7 +1432,7 @@ class Series:
                     args.append(arg)
                 elif isinstance(arg, Series):
                     validity_mask &= arg.is_not_null()
-                    args.append(arg._view(ignore_nulls=True))
+                    args.append(arg.to_physical()._s.to_numpy_view())
                 else:
                     msg = f"unsupported type {type(arg).__name__!r} for {arg!r}"
                     raise TypeError(msg)
@@ -1487,7 +1489,7 @@ class Series:
 
     def _repr_html_(self) -> str:
         """Format output data in HTML for display in Jupyter Notebooks."""
-        return self.to_frame()._repr_html_(from_series=True)
+        return self.to_frame()._repr_html_(_from_series=True)
 
     @deprecate_renamed_parameter("row", "index", version="0.19.3")
     def item(self, index: int | None = None) -> Any:
@@ -4279,9 +4281,10 @@ class Series:
     def to_numpy(
         self,
         *,
-        zero_copy_only: bool = False,
+        allow_copy: bool = True,
         writable: bool = False,
         use_pyarrow: bool = True,
+        zero_copy_only: bool | None = None,
     ) -> np.ndarray[Any, Any]:
         """
         Convert this Series to a NumPy ndarray.
@@ -4292,14 +4295,13 @@ class Series:
         - Floating point `nan` values can be zero-copied
         - Booleans cannot be zero-copied
 
-        To ensure that no data is copied, set `zero_copy_only=True`.
+        To ensure that no data is copied, set `allow_copy=False`.
 
         Parameters
         ----------
-        zero_copy_only
-            Raise an exception if the conversion to a NumPy would require copying
-            the underlying data. Data copy occurs, for example, when the Series contains
-            nulls or non-numeric types.
+        allow_copy
+            Allow memory to be copied to perform the conversion. If set to `False`,
+            causes conversions that are not zero-copy to fail.
         writable
             Ensure the resulting array is writable. This will force a copy of the data
             if the array was created without copy, as the underlying Arrow data is
@@ -4308,6 +4310,14 @@ class Series:
             Use `pyarrow.Array.to_numpy
             <https://arrow.apache.org/docs/python/generated/pyarrow.Array.html#pyarrow.Array.to_numpy>`_
             for the conversion to NumPy.
+        zero_copy_only
+            Raise an exception if the conversion to a NumPy would require copying
+            the underlying data. Data copy occurs, for example, when the Series contains
+            nulls or non-numeric types.
+
+            .. deprecated:: 0.20.10
+                Use the `allow_copy` parameter instead, which is the inverse of this
+                one.
 
         Examples
         --------
@@ -4318,9 +4328,16 @@ class Series:
         >>> type(arr)
         <class 'numpy.ndarray'>
         """
+        if zero_copy_only is not None:
+            issue_deprecation_warning(
+                "The `zero_copy_only` parameter for `Series.to_numpy` is deprecated."
+                " Use the `allow_copy` parameter instead, which is the inverse of `zero_copy_only`.",
+                version="0.20.10",
+            )
+            allow_copy = not zero_copy_only
 
-        def raise_no_zero_copy() -> None:
-            if zero_copy_only and not self.is_empty():
+        def raise_on_copy() -> None:
+            if not allow_copy and not self.is_empty():
                 msg = "cannot return a zero-copy array"
                 raise ValueError(msg)
 
@@ -4336,14 +4353,14 @@ class Series:
                 raise TypeError(msg)
 
         if self.n_chunks() > 1:
-            raise_no_zero_copy()
+            raise_on_copy()
             self = self.rechunk()
 
         dtype = self.dtype
 
         if dtype == Array:
             np_array = self.explode().to_numpy(
-                zero_copy_only=zero_copy_only,
+                allow_copy=allow_copy,
                 writable=writable,
                 use_pyarrow=use_pyarrow,
             )
@@ -4356,71 +4373,41 @@ class Series:
             and dtype not in (Object, Datetime, Duration, Date)
         ):
             return self.to_arrow().to_numpy(
-                zero_copy_only=zero_copy_only, writable=writable
+                zero_copy_only=not allow_copy, writable=writable
             )
 
         if self.null_count() == 0:
             if dtype.is_integer() or dtype.is_float():
-                np_array = self._view(ignore_nulls=True)
+                np_array = self._s.to_numpy_view()
             elif dtype == Boolean:
-                raise_no_zero_copy()
-                np_array = self.cast(UInt8)._view(ignore_nulls=True).view(bool)
+                raise_on_copy()
+                s_u8 = self.cast(UInt8)
+                np_array = s_u8._s.to_numpy_view().view(bool)
             elif dtype in (Datetime, Duration):
                 np_dtype = temporal_dtype_to_numpy(dtype)
-                np_array = self._view(ignore_nulls=True).view(np_dtype)
+                s_i64 = self.to_physical()
+                np_array = s_i64._s.to_numpy_view().view(np_dtype)
             elif dtype == Date:
-                raise_no_zero_copy()
+                raise_on_copy()
                 np_dtype = temporal_dtype_to_numpy(dtype)
-                np_array = self.to_physical()._view(ignore_nulls=True).astype(np_dtype)
+                s_i32 = self.to_physical()
+                np_array = s_i32._s.to_numpy_view().astype(np_dtype)
             else:
-                raise_no_zero_copy()
+                raise_on_copy()
                 np_array = self._s.to_numpy()
 
         else:
-            raise_no_zero_copy()
+            raise_on_copy()
             np_array = self._s.to_numpy()
             if dtype in (Datetime, Duration, Date):
                 np_dtype = temporal_dtype_to_numpy(dtype)
                 np_array = np_array.view(np_dtype)
 
         if writable and not np_array.flags.writeable:
-            raise_no_zero_copy()
+            raise_on_copy()
             np_array = np_array.copy()
 
         return np_array
-
-    def _view(self, *, ignore_nulls: bool = False) -> SeriesView:
-        """
-        Get a view into this Series data with a numpy array.
-
-        This operation doesn't clone data, but does not include missing values.
-
-        Returns
-        -------
-        SeriesView
-
-        Parameters
-        ----------
-        ignore_nulls
-            If True then nulls are converted to 0.
-            If False then an Exception is raised if nulls are present.
-
-        Examples
-        --------
-        >>> s = pl.Series("a", [1, None])
-        >>> s._view(ignore_nulls=True)
-        SeriesView([1, 0])
-        """
-        if not ignore_nulls:
-            assert not self.null_count()
-
-        from polars.series._numpy import SeriesView, _ptr_to_numpy
-
-        ptr_type = dtype_to_ctype(self.dtype)
-        ptr = self._s.as_single_ptr()
-        array = _ptr_to_numpy(ptr, self.len(), ptr_type)
-        array.setflags(write=False)
-        return SeriesView(array, self)
 
     def to_arrow(self) -> pa.Array:
         """
@@ -6475,6 +6462,16 @@ class Series:
             Pearson's definition is used (normal ==> 3.0).
         bias : bool, optional
             If False, the calculations are corrected for statistical bias.
+
+        Examples
+        --------
+        >>> s = pl.Series("grades", [66, 79, 54, 97, 96, 70, 69, 85, 93, 75])
+        >>> s.kurtosis()
+        -1.0522623626787952
+        >>> s.kurtosis(fisher=False)
+        1.9477376373212048
+        >>> s.kurtosis(fisher=False, bias=False)
+        2.104036180264273
         """
         return self._s.kurtosis(fisher, bias)
 
@@ -6783,7 +6780,7 @@ class Series:
         *,
         adjust: bool = True,
         min_periods: int = 1,
-        ignore_nulls: bool = True,
+        ignore_nulls: bool | None = None,
     ) -> Series:
         r"""
         Exponentially-weighted moving average.
@@ -6812,7 +6809,7 @@ class Series:
             Divide by decaying adjustment factor in beginning periods to account for
             imbalance in relative weightings
 
-                - When `adjust=True` the EW function is calculated
+                - When `adjust=True` (the default) the EW function is calculated
                   using weights :math:`w_i = (1 - \alpha)^i`
                 - When `adjust=False` the EW function is calculated
                   recursively by
@@ -6826,7 +6823,7 @@ class Series:
         ignore_nulls
             Ignore missing values when calculating weights.
 
-                - When `ignore_nulls=False` (default), weights are based on absolute
+                - When `ignore_nulls=False`, weights are based on absolute
                   positions.
                   For example, the weights of :math:`x_0` and :math:`x_2` used in
                   calculating the final weighted average of
@@ -6834,7 +6831,7 @@ class Series:
                   :math:`(1-\alpha)^2` and :math:`1` if `adjust=True`, and
                   :math:`(1-\alpha)^2` and :math:`\alpha` if `adjust=False`.
 
-                - When `ignore_nulls=True`, weights are based
+                - When `ignore_nulls=True` (current default), weights are based
                   on relative positions. For example, the weights of
                   :math:`x_0` and :math:`x_2` used in calculating the final weighted
                   average of [:math:`x_0`, None, :math:`x_2`] are
@@ -6844,7 +6841,7 @@ class Series:
         Examples
         --------
         >>> s = pl.Series([1, 2, 3])
-        >>> s.ewm_mean(com=1)
+        >>> s.ewm_mean(com=1, ignore_nulls=False)
         shape: (3,)
         Series: '' [f64]
         [
@@ -6865,7 +6862,7 @@ class Series:
         adjust: bool = True,
         bias: bool = False,
         min_periods: int = 1,
-        ignore_nulls: bool = True,
+        ignore_nulls: bool | None = None,
     ) -> Series:
         r"""
         Exponentially-weighted moving standard deviation.
@@ -6894,7 +6891,7 @@ class Series:
             Divide by decaying adjustment factor in beginning periods to account for
             imbalance in relative weightings
 
-                - When `adjust=True` the EW function is calculated
+                - When `adjust=True` (the default) the EW function is calculated
                   using weights :math:`w_i = (1 - \alpha)^i`
                 - When `adjust=False` the EW function is calculated
                   recursively by
@@ -6911,7 +6908,7 @@ class Series:
         ignore_nulls
             Ignore missing values when calculating weights.
 
-                - When `ignore_nulls=False` (default), weights are based on absolute
+                - When `ignore_nulls=False`, weights are based on absolute
                   positions.
                   For example, the weights of :math:`x_0` and :math:`x_2` used in
                   calculating the final weighted average of
@@ -6919,7 +6916,7 @@ class Series:
                   :math:`(1-\alpha)^2` and :math:`1` if `adjust=True`, and
                   :math:`(1-\alpha)^2` and :math:`\alpha` if `adjust=False`.
 
-                - When `ignore_nulls=True`, weights are based
+                - When `ignore_nulls=True` (current default), weights are based
                   on relative positions. For example, the weights of
                   :math:`x_0` and :math:`x_2` used in calculating the final weighted
                   average of [:math:`x_0`, None, :math:`x_2`] are
@@ -6929,7 +6926,7 @@ class Series:
         Examples
         --------
         >>> s = pl.Series("a", [1, 2, 3])
-        >>> s.ewm_std(com=1)
+        >>> s.ewm_std(com=1, ignore_nulls=False)
         shape: (3,)
         Series: 'a' [f64]
         [
@@ -6950,7 +6947,7 @@ class Series:
         adjust: bool = True,
         bias: bool = False,
         min_periods: int = 1,
-        ignore_nulls: bool = True,
+        ignore_nulls: bool | None = None,
     ) -> Series:
         r"""
         Exponentially-weighted moving variance.
@@ -6979,7 +6976,7 @@ class Series:
             Divide by decaying adjustment factor in beginning periods to account for
             imbalance in relative weightings
 
-                - When `adjust=True` the EW function is calculated
+                - When `adjust=True` (the default) the EW function is calculated
                   using weights :math:`w_i = (1 - \alpha)^i`
                 - When `adjust=False` the EW function is calculated
                   recursively by
@@ -6996,7 +6993,7 @@ class Series:
         ignore_nulls
             Ignore missing values when calculating weights.
 
-                - When `ignore_nulls=False` (default), weights are based on absolute
+                - When `ignore_nulls=False`, weights are based on absolute
                   positions.
                   For example, the weights of :math:`x_0` and :math:`x_2` used in
                   calculating the final weighted average of
@@ -7004,7 +7001,7 @@ class Series:
                   :math:`(1-\alpha)^2` and :math:`1` if `adjust=True`, and
                   :math:`(1-\alpha)^2` and :math:`\alpha` if `adjust=False`.
 
-                - When `ignore_nulls=True`, weights are based
+                - When `ignore_nulls=True` (current default), weights are based
                   on relative positions. For example, the weights of
                   :math:`x_0` and :math:`x_2` used in calculating the final weighted
                   average of [:math:`x_0`, None, :math:`x_2`] are
@@ -7014,7 +7011,7 @@ class Series:
         Examples
         --------
         >>> s = pl.Series("a", [1, 2, 3])
-        >>> s.ewm_var(com=1)
+        >>> s.ewm_var(com=1, ignore_nulls=False)
         shape: (3,)
         Series: 'a' [f64]
         [
@@ -7520,7 +7517,7 @@ class Series:
         return self.cum_prod(reverse=reverse)
 
     @deprecate_function(
-        "Use `Series.to_numpy(zero_copy_only=True) instead.", version="0.19.14"
+        "Use `Series.to_numpy(allow_copy=False) instead.", version="0.19.14"
     )
     def view(self, *, ignore_nulls: bool = False) -> SeriesView:
         """
@@ -7538,7 +7535,16 @@ class Series:
             If True then nulls are converted to 0.
             If False then an Exception is raised if nulls are present.
         """
-        return self._view(ignore_nulls=ignore_nulls)
+        if not ignore_nulls:
+            assert not self.null_count()
+
+        from polars.series._numpy import SeriesView, _ptr_to_numpy
+
+        ptr_type = dtype_to_ctype(self.dtype)
+        ptr = self._s.as_single_ptr()
+        array = _ptr_to_numpy(ptr, self.len(), ptr_type)
+        array.setflags(write=False)
+        return SeriesView(array, self)
 
     @deprecate_function(
         "It has been renamed to `replace`."

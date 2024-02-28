@@ -68,7 +68,7 @@ from polars.utils._parse_expr_input import (
     parse_as_list_of_expressions,
 )
 from polars.utils._wrap import wrap_df, wrap_expr
-from polars.utils.convert import _negate_duration, _timedelta_to_pl_duration
+from polars.utils.convert import negate_duration_string, parse_as_duration_string
 from polars.utils.deprecation import (
     deprecate_function,
     deprecate_parameter_as_positional,
@@ -286,6 +286,7 @@ class LazyFrame:
     └─────┴─────┴─────┘
     """
 
+    __slots__ = ("_ldf",)
     _ldf: PyLazyFrame
     _accessors: ClassVar[set[str]] = set()
 
@@ -1001,10 +1002,11 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
 
         Customize which percentiles are displayed, applying linear interpolation:
 
-        >>> lf.describe(
-        ...     percentiles=[0.1, 0.3, 0.5, 0.7, 0.9],
-        ...     interpolation="linear",
-        ... )
+        >>> with pl.Config(tbl_rows=12):
+        ...     lf.describe(
+        ...         percentiles=[0.1, 0.3, 0.5, 0.7, 0.9],
+        ...         interpolation="linear",
+        ...     )
         shape: (11, 7)
         ┌────────────┬──────────┬──────────┬──────────┬──────┬────────────┬──────────┐
         │ statistic  ┆ float    ┆ int      ┆ bool     ┆ str  ┆ date       ┆ time     │
@@ -3233,7 +3235,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         check_sorted: bool = True,
     ) -> LazyGroupBy:
         """
-        Create rolling groups based on a time, Int32, or Int64 column.
+        Create rolling groups based on a temporal or integer column.
 
         Different from a `dynamic_group_by` the windows are now determined by the
         individual values and are not of constant intervals. For constant intervals
@@ -3277,11 +3279,6 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         not be 24 hours, due to daylight savings). Similarly for "calendar week",
         "calendar month", "calendar quarter", and "calendar year".
 
-        In case of a rolling operation on an integer column, the windows are defined by:
-
-        - "1i"      # length 1
-        - "10i"     # length 10
-
         Parameters
         ----------
         index_column
@@ -3291,8 +3288,8 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             then it must be sorted in ascending order within each group).
 
             In case of a rolling group by on indices, dtype needs to be one of
-            {Int32, Int64}. Note that Int32 gets temporarily cast to Int64, so if
-            performance matters use an Int64 column.
+            {UInt32, UInt64, Int32, Int64}. Note that the first three get temporarily
+            cast to Int64, so if performance matters use an Int64 column.
         period
             length of the window - must be non-negative
         offset
@@ -3360,11 +3357,11 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         offset = deprecate_saturating(offset)
         index_column = parse_as_expression(index_column)
         if offset is None:
-            offset = _negate_duration(_timedelta_to_pl_duration(period))
+            offset = negate_duration_string(parse_as_duration_string(period))
 
         pyexprs_by = parse_as_list_of_expressions(by) if by is not None else []
-        period = _timedelta_to_pl_duration(period)
-        offset = _timedelta_to_pl_duration(offset)
+        period = parse_as_duration_string(period)
+        offset = parse_as_duration_string(offset)
 
         lgb = self._ldf.rolling(
             index_column, period, offset, closed, pyexprs_by, check_sorted
@@ -3706,14 +3703,14 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
 
         index_column = parse_as_expression(index_column)
         if offset is None:
-            offset = _negate_duration(_timedelta_to_pl_duration(every))
+            offset = negate_duration_string(parse_as_duration_string(every))
 
         if period is None:
             period = every
 
-        period = _timedelta_to_pl_duration(period)
-        offset = _timedelta_to_pl_duration(offset)
-        every = _timedelta_to_pl_duration(every)
+        period = parse_as_duration_string(period)
+        offset = parse_as_duration_string(offset)
+        every = parse_as_duration_string(every)
 
         pyexprs_by = parse_as_list_of_expressions(by) if by is not None else []
         lgb = self._ldf.group_by_dynamic(
@@ -3890,7 +3887,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         if isinstance(tolerance, str):
             tolerance_str = tolerance
         elif isinstance(tolerance, timedelta):
-            tolerance_str = _timedelta_to_pl_duration(tolerance)
+            tolerance_str = parse_as_duration_string(tolerance)
         else:
             tolerance_num = tolerance
 
@@ -3952,7 +3949,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
             * *outer_coalesce*
                  Same as 'outer', but coalesces the key columns
             * *cross*
-                 Returns the cartisian product of rows from both tables
+                 Returns the Cartesian product of rows from both tables
             * *semi*
                  Filter rows that have a match in the right table.
             * *anti*
@@ -4813,9 +4810,15 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         """
         return self.slice(0, 1)
 
+    @deprecate_function(
+        "Use `select(pl.all().approx_n_unique())` instead.", version="0.20.11"
+    )
     def approx_n_unique(self) -> Self:
         """
         Approximate count of unique values.
+
+        .. deprecated:: 0.20.11
+            Use `select(pl.all().approx_n_unique())` instead.
 
         This is done using the HyperLogLog++ algorithm for cardinality estimation.
 
@@ -4827,7 +4830,7 @@ naive plan: (run LazyFrame.explain(optimized=True) to see the optimized plan)
         ...         "b": [1, 2, 1, 1],
         ...     }
         ... )
-        >>> lf.approx_n_unique().collect()
+        >>> lf.approx_n_unique().collect()  # doctest: +SKIP
         shape: (1, 2)
         ┌─────┬─────┐
         │ a   ┆ b   │
