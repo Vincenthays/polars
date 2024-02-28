@@ -55,15 +55,12 @@ impl PyLazyFrame {
 
     fn __setstate__(&mut self, py: Python, state: PyObject) -> PyResult<()> {
         // Used in pickle/pickling
-        match state.extract::<&PyBytes>(py) {
-            Ok(s) => {
-                let lp: LogicalPlan = ciborium::de::from_reader(s.as_bytes())
-                    .map_err(|e| PyPolarsErr::Other(format!("{}", e)))?;
-                self.ldf = LazyFrame::from(lp);
-                Ok(())
-            },
-            Err(e) => Err(e),
-        }
+        let bytes = state.extract::<&PyBytes>(py)?.as_bytes();
+        let lp: LogicalPlan = ciborium::de::from_reader(bytes)
+            .map_err(|e| PyPolarsErr::Other(format!("{e}")))?;
+        self.ldf = LazyFrame::from(lp);
+
+        Ok(())
     }
 
     #[cfg(all(feature = "json", feature = "serde_json"))]
